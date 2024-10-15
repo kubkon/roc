@@ -38,6 +38,7 @@ pub fn supported(link_type: LinkType, target: Target) -> bool {
             Target::WinX64 => true,
             // macho support is incomplete
             Target::MacX64 => false,
+            Target::MacArm64 => true,
             _ => false,
         }
     } else {
@@ -62,7 +63,7 @@ pub fn link_preprocessed_host(
     binary_path: &Path,
 ) {
     let metadata = platform_path.with_file_name(metadata_file_name(target));
-    surgery(roc_app_bytes, &metadata, binary_path, false, false, target)
+    surgery(roc_app_bytes, &metadata, binary_path, true, false, target)
 }
 
 // Exposed function to load a platform file and generate a stub lib for it.
