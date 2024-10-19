@@ -4,8 +4,8 @@ use memmap2::MmapMut;
 use object::macho;
 use object::{
     CompressedFileRange, CompressionFormat, LittleEndian as LE, Object, ObjectSection,
-    ObjectSymbol, RelocationKind, RelocationTarget, Section, SectionIndex, SectionKind, Symbol,
-    SymbolIndex, SymbolSection,
+    ObjectSymbol, RelocationEncoding, RelocationKind, RelocationTarget, Section, SectionIndex,
+    SectionKind, Symbol, SymbolIndex, SymbolSection,
 };
 use roc_collections::all::MutMap;
 use roc_error_macros::internal_error;
@@ -1330,7 +1330,6 @@ fn surgery_macho_help(
             );
         }
 
-        let mut addend: Option<i64> = None;
         let mut subtractor: Option<SymbolIndex> = None;
         for rel in sec.relocations() {
             if verbose {
@@ -1339,7 +1338,7 @@ fn surgery_macho_help(
             match rel.1.target() {
                 RelocationTarget::Symbol(index) => {
                     let target_offset = if let Some(target_offset) =
-                        get_target_offset(index, &app_obj, md, &symbol_vaddr_map, verbose)
+                        get_symbol_offset(index, &app_obj, md, &symbol_vaddr_map, verbose)
                     {
                         target_offset
                     } else if matches!(app_obj.symbol_by_index(index), Ok(sym) if ["__divti3", "__udivti3", "___divti3", "___udivti3"].contains(&sym.name().unwrap_or_default()))
@@ -1379,7 +1378,12 @@ fn surgery_macho_help(
                     let virt_base = section_virtual_offset + rel.0 as usize;
                     let base = section_offset + rel.0 as usize;
                     let target: i64 = match rel.1.kind() {
-                        RelocationKind::Relative | RelocationKind::PltRelative => {
+                        RelocationKind::Relative => {
+                            match rel.1.encoding() {
+                                RelocationEncoding::X86Branch => {}
+                                RelocationEncoding::X86RipRelative => {}
+                                _ => panic!("unreachable"),
+                            }
                             target_offset - virt_base as i64 + rel.1.addend()
                         }
                         RelocationKind::Absolute => {
@@ -1387,7 +1391,7 @@ fn surgery_macho_help(
                                 - subtractor
                                     .take()
                                     .map(|index| {
-                                        get_target_offset(
+                                        get_symbol_offset(
                                             index,
                                             &app_obj,
                                             md,
@@ -1432,6 +1436,13 @@ fn surgery_macho_help(
                         x => {
                             internal_error!("Relocation size not yet supported: {}", x);
                         }
+                    }
+                }
+
+                RelocationTarget::Section(index) => {
+                    let offset = get_section_offset(index, &app_obj, md);
+                    if verbose {
+                        println!("\t\tRelocation target is a section offset: {offset:x}");
                     }
                 }
 
@@ -1633,7 +1644,7 @@ fn surgery_macho_help(
     *offset_ref = offset;
 }
 
-fn get_target_offset(
+fn get_symbol_offset(
     index: SymbolIndex,
     app_obj: &object::File,
     md: &Metadata,
@@ -1661,4 +1672,8 @@ fn get_target_offset(
                 })
             })
     }
+}
+
+fn get_section_offset(index: SectionIndex, app_obj: &object::File, md: &Metadata) -> i64 {
+    0
 }

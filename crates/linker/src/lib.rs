@@ -37,7 +37,7 @@ pub fn supported(link_type: LinkType, target: Target) -> bool {
             Target::LinuxX64 => true,
             Target::WinX64 => true,
             // macho support is incomplete
-            Target::MacX64 => false,
+            Target::MacX64 => true,
             Target::MacArm64 => true,
             _ => false,
         }
