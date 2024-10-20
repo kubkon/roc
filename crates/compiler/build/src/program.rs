@@ -977,12 +977,13 @@ fn build_loaded_file<'a>(
     // Step 2: link the prebuilt platform and compiled app
     let link_start = Instant::now();
 
+    if false {
+        let mut f = std::fs::File::create("tmp_roc.o").unwrap();
+        std::io::Write::write_all(&mut f, &roc_app_bytes).unwrap();
+    }
+
     match (linking_strategy, link_type) {
         (LinkingStrategy::Surgical, _) => {
-            if false {
-                let mut f = std::fs::File::create("tmp_roc.o").unwrap();
-                std::io::Write::write_all(&mut f, &roc_app_bytes).unwrap();
-            }
             roc_linker::link_preprocessed_host(
                 target,
                 &platform_main_roc,

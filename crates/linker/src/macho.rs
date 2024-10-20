@@ -1211,7 +1211,9 @@ fn surgery_macho_help(
 
     let rodata_sections: Vec<Section> = app_obj
         .sections()
-        .filter(|sec| sec.kind() == SectionKind::ReadOnlyData)
+        .filter(|sec| {
+            sec.kind() == SectionKind::ReadOnlyData || sec.kind() == SectionKind::ReadOnlyString
+        })
         .filter(|sec| sec.name().unwrap_or("") != "__eh_frame") // ignore __eh_frame for now
         .collect();
 
@@ -1230,6 +1232,11 @@ fn surgery_macho_help(
     }
 
     if verbose {
+        println!();
+        println!("App symbols:");
+        for sym in app_obj.symbols() {
+            println!("\t\t{sym:?}");
+        }
         println!();
         println!("Roc symbol addresses: {:+x?}", md.roc_symbol_vaddresses);
         println!("App functions: {:?}", md.app_functions);
