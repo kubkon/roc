@@ -1116,16 +1116,7 @@ pub(crate) fn surgery_macho(
     let out_gen_start = Instant::now();
     let mut offset = 0;
 
-    surgery_macho_help(
-        metadata_path,
-        executable_path,
-        verbose,
-        time,
-        &md,
-        &mut exec_mmap,
-        &mut offset,
-        app_obj,
-    );
+    surgery_macho_help(verbose, &md, &mut exec_mmap, &mut offset, app_obj);
 
     let out_gen_duration = out_gen_start.elapsed();
     let flushing_data_start = Instant::now();
@@ -1171,12 +1162,8 @@ pub(crate) fn surgery_macho(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn surgery_macho_help(
-    _metadata_filename: &Path,
-    _out_filename: &Path,
     verbose: bool,
-    _time: bool,
     md: &Metadata,
     exec_mmap: &mut MmapMut,
     offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
