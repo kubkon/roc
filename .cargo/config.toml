@@ -24,6 +24,9 @@ rustflags = ["-Copt-level=s", "-Clto=fat", "-Cembed-bitcode=yes"]
 [target.'cfg(target_os = "windows")']
 rustflags = ["-Clink-args=/FORCE:UNRESOLVED"]
 
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-fuse-ld=emerald"]
+
 [env]
 # Gives us the path of the workspace root for use in cargo tests without having
 # to compute it per-package.

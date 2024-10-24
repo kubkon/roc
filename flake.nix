@@ -18,6 +18,8 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
+    # emerald linker just for fun on macOS
+    emerald.url = "github:kubkon/emerald";
 
     # for non flake backwards compatibility
     flake-compat = {
@@ -26,17 +28,17 @@
     };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils, nixgl, ... }@inputs:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils, nixgl, emerald, ... }@inputs:
     let
+      prev_overlays = [(final: prev: { emeraldpkgs = inputs.emerald.packages.${prev.system}; })];
       supportedSystems = [ "x86_64-linux" "x86_64-darwin" "aarch64-darwin" "aarch64-linux" ];
-
       templates = import ./nix/templates { };
     in
     { inherit templates; } //
     flake-utils.lib.eachSystem supportedSystems (system:
       let
-        overlays = [ (import rust-overlay) ]
-        ++ (if system == "x86_64-linux" then [ nixgl.overlay ] else [ ]);
+        overlays = prev_overlays ++ [ (import rust-overlay) ]
+        ++ (if system == "x86_64-linux" then [ nixgl.overlay ] else []);
         pkgs = import nixpkgs { inherit system overlays; };
 
         rocBuild = import ./nix { inherit pkgs; };
@@ -68,6 +70,8 @@
               CoreVideo # for examples/gui
               Metal # for examples/gui
               curl # for wasm-bindgen-cli libcurl (see ./ci/www-repl.sh)
+            ] ++ [
+              emeraldpkgs.default # emerald linker
             ]);
 
         sharedInputs = (with pkgs; [
