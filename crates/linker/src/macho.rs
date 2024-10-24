@@ -706,7 +706,7 @@ fn gen_macho_le(
     // };
 
     // minus one because we "deleted" a load command
-    for _ in 0..(num_load_cmds - 1) {
+    for segnum in 0..(num_load_cmds - 1) {
         let info = load_struct_inplace::<macho::LoadCommand<LE>>(&out_mmap, offset);
         let cmd_size = info.cmdsize.get(LE) as usize;
 
@@ -734,51 +734,49 @@ fn gen_macho_le(
                     cmd.vmsize.set(LE, cmd.vmsize.get(LE) + md.added_byte_count);
                 }
 
-                // let num_sections = cmd.nsects.get(LE);
-                // let sections = load_structs_inplace_mut::<macho::Section64<LE >>(
-                //     &mut out_mmap,
-                //     offset + mem::size_of::<macho::SegmentCommand64<LE >>(),
-                //     num_sections as usize,
-                // );
-                // struct Relocation {
-                //     offset: u32,
-                //     num_relocations: u32,
-                // }
+                let num_sections = cmd.nsects.get(LE);
+                let sections = load_structs_inplace_mut::<macho::Section64<LE>>(
+                    &mut out_mmap,
+                    offset + mem::size_of::<macho::SegmentCommand64<LE>>(),
+                    num_sections as usize,
+                );
+                struct Relocation {
+                    offset: u32,
+                    num_relocations: u32,
+                }
 
-                // let mut relocation_offsets = Vec::with_capacity(sections.len());
+                let mut relocation_offsets = Vec::with_capacity(sections.len());
 
-                // for section in sections {
-                //     section.addr.set(
-                //         LE ,
-                //         section.addr.get(LE) + md.added_byte_count as u64,
-                //     );
+                for section in sections {
+                    section
+                        .addr
+                        .set(LE, section.addr.get(LE) + md.added_byte_count as u64);
 
-                //     // If offset is zero, don't update it.
-                //     // Zero is used for things like BSS that don't exist in the file.
-                //     let old_offset = section.offset.get(LE);
-                //     if old_offset > 0 {
-                //         section
-                //             .offset
-                //             .set(LE , old_offset + md.added_byte_count as u32);
-                //     }
+                    // If offset is zero, don't update it.
+                    // Zero is used for things like BSS that don't exist in the file.
+                    let old_offset = section.offset.get(LE);
+                    if old_offset > 0 {
+                        section
+                            .offset
+                            .set(LE, old_offset + md.added_byte_count as u32);
+                    }
 
-                //     // dbg!(&section.reloff.get(LE));
-                //     // dbg!(section.reloff.get(LE) as i32);
-                //     // dbg!(&section);
-                //     // dbg!(&md.added_byte_count);
-                //     // dbg!(String::from_utf8_lossy(&section.sectname));
-                //     if section.nreloc.get(LE) > 0 {
-                //         section.reloff.set(
-                //             LE ,
-                //             section.reloff.get(LE) + md.added_byte_count as u32,
-                //         );
-                //     }
+                    // dbg!(&section.reloff.get(LE));
+                    // dbg!(section.reloff.get(LE) as i32);
+                    // dbg!(&section);
+                    // dbg!(&md.added_byte_count);
+                    // dbg!(String::from_utf8_lossy(&section.sectname));
+                    if section.nreloc.get(LE) > 0 {
+                        section
+                            .reloff
+                            .set(LE, section.reloff.get(LE) + md.added_byte_count as u32);
+                    }
 
-                //     relocation_offsets.push(Relocation {
-                //         offset: section.reloff.get(LE),
-                //         num_relocations: section.nreloc.get(LE),
-                //     });
-                // }
+                    relocation_offsets.push(Relocation {
+                        offset: section.reloff.get(LE),
+                        num_relocations: section.nreloc.get(LE),
+                    });
+                }
 
                 // TODO FIXME this is necessary for ARM, but seems to be broken. Skipping for now since we're just targeting x86
                 // for Relocation {
