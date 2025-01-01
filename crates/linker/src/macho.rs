@@ -4,9 +4,8 @@ use memmap2::MmapMut;
 use object::macho;
 use object::read::macho::{MachOFile64, MachOSection64, MachOSymbol64};
 use object::{
-    CompressedFileRange, CompressionFormat, LittleEndian as LE, Object, ObjectSection,
-    ObjectSymbol, RelocationFlags, RelocationKind, RelocationTarget, SectionIndex, SectionKind,
-    SymbolIndex, SymbolSection,
+    LittleEndian as LE, Object, ObjectSection, ObjectSymbol, RelocationFlags, RelocationKind,
+    RelocationTarget, SectionIndex, SectionKind, SymbolIndex, SymbolSection,
 };
 use roc_collections::all::MutMap;
 use roc_error_macros::internal_error;
@@ -26,9 +25,9 @@ use crate::{
     open_mmap_mut,
 };
 
-type Section<'a> = MachOSection64<'a, 'a, object::LittleEndian, &'a [u8]>;
-type File<'a> = MachOFile64<'a, object::LittleEndian, &'a [u8]>;
-type Symbol<'a> = MachOSymbol64<'a, 'a, object::LittleEndian, &'a [u8]>;
+type Section<'a> = MachOSection64<'a, 'a, LE, &'a [u8]>;
+type File<'a> = MachOFile64<'a, LE, &'a [u8]>;
+type Symbol<'a> = MachOSymbol64<'a, 'a, LE, &'a [u8]>;
 
 const MIN_SECTION_ALIGNMENT: usize = 0x40;
 
@@ -186,27 +185,15 @@ impl<'a> Surgeries<'a> {
     }
 
     fn append_text_section(&mut self, object_bytes: &[u8], sec: &Section, verbose: bool) {
-        let (file_offset, compressed) = match sec.compressed_file_range() {
-            Ok(CompressedFileRange {
-                format: CompressionFormat::None,
-                offset,
-                ..
-            }) => (offset, false),
-            Ok(range) => (range.offset, true),
-            Err(err) => {
-                internal_error!(
-                    "Issues dealing with section compression for {:+x?}: {}",
-                    sec,
-                    err
-                );
-            }
+        let file_offset = if let Some((file_offset, _)) = sec.file_range() {
+            file_offset
+        } else {
+            internal_error!("Could not get file range for {sec:+x?}");
         };
 
-        let data = match sec.uncompressed_data() {
+        let data = match sec.data() {
             Ok(data) => data,
-            Err(err) => {
-                internal_error!("Failed to load text section, {:+x?}: {}", sec, err);
-            }
+            Err(err) => internal_error!("Failed to load text section, {:+x?}: {err}", sec),
         };
         let mut decoder = Decoder::with_ip(64, &data, sec.address(), DecoderOptions::NONE);
         let mut inst = Instruction::default();
@@ -224,10 +211,6 @@ impl<'a> Surgeries<'a> {
                 Ok(OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64) => {
                     let target = inst.near_branch_target();
                     if let Some(func_name) = self.app_func_addresses.get(&target) {
-                        if compressed {
-                            internal_error!("Surgical linking does not work with compressed text sections: {:+x?}", sec);
-                        }
-
                         if verbose {
                             println!(
                                 "Found branch from {:+x} to {:+x}({})",
@@ -346,16 +329,10 @@ pub(crate) fn preprocess_macho_le(
 
     let (plt_address, plt_offset) = match exec_obj.section_by_name(plt_section_name) {
         Some(section) => {
-            let file_offset = match section.compressed_file_range() {
-                Ok(
-                    range @ CompressedFileRange {
-                        format: CompressionFormat::None,
-                        ..
-                    },
-                ) => range.offset,
-                _ => {
-                    internal_error!("Surgical linking does not work with compressed plt section");
-                }
+            let file_offset = if let Some((file_offset, _)) = section.file_range() {
+                file_offset
+            } else {
+                internal_error!("Could not get file range for {section:+x?}");
             };
             (section.address(), file_offset)
         }
