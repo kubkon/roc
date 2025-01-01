@@ -2,10 +2,11 @@ use bincode::{deserialize_from, serialize_into};
 use iced_x86::{Decoder, DecoderOptions, Instruction, OpCodeOperandKind, OpKind};
 use memmap2::MmapMut;
 use object::macho;
+use object::read::macho::{MachOFile64, MachOSection64, MachOSymbol64};
 use object::{
     CompressedFileRange, CompressionFormat, LittleEndian as LE, Object, ObjectSection,
-    ObjectSymbol, RelocationFlags, RelocationKind, RelocationTarget, Section, SectionIndex,
-    SectionKind, Symbol, SymbolIndex, SymbolSection,
+    ObjectSymbol, RelocationFlags, RelocationKind, RelocationTarget, SectionIndex, SectionKind,
+    SymbolIndex, SymbolSection,
 };
 use roc_collections::all::MutMap;
 use roc_error_macros::internal_error;
@@ -18,12 +19,16 @@ use std::{
     time::Instant,
 };
 
-use crate::util::{is_roc_definition, is_roc_undefined, report_timing};
+use crate::util::{is_roc_undefined, report_timing};
 use crate::{
     align_by_constraint, align_to_offset_by_constraint, load_struct_inplace,
     load_struct_inplace_mut, load_structs_inplace, load_structs_inplace_mut, open_mmap,
     open_mmap_mut,
 };
+
+type Section<'a> = MachOSection64<'a, 'a, object::LittleEndian, &'a [u8]>;
+type File<'a> = MachOFile64<'a, object::LittleEndian, &'a [u8]>;
+type Symbol<'a> = MachOSymbol64<'a, 'a, object::LittleEndian, &'a [u8]>;
 
 const MIN_SECTION_ALIGNMENT: usize = 0x40;
 
@@ -105,10 +110,10 @@ impl Metadata {
     }
 }
 
-fn collect_roc_definitions<'a>(object: &object::File<'a, &'a [u8]>) -> MutMap<String, u64> {
+fn collect_roc_definitions(object: &File) -> MutMap<String, u64> {
     let mut vaddresses = MutMap::default();
 
-    for sym in object.symbols().filter(is_roc_definition) {
+    for sym in object.symbols().filter(is_roc_undefined) {
         let name = sym.name().unwrap().trim_start_matches('_');
         let address = sym.address();
 
@@ -154,12 +159,7 @@ impl<'a> Surgeries<'a> {
         }
     }
 
-    fn append_text_sections(
-        &mut self,
-        object_bytes: &[u8],
-        object: &object::File<'a, &'a [u8]>,
-        verbose: bool,
-    ) {
+    fn append_text_sections(&mut self, object_bytes: &[u8], object: &File, verbose: bool) {
         let text_sections: Vec<Section> = object
             .sections()
             .filter(|sec| sec.kind() == SectionKind::Text)
@@ -309,10 +309,14 @@ pub(crate) fn preprocess_macho_le(
     verbose: bool,
     time: bool,
 ) {
+    if verbose {
+        println!("Memory mapping file: {}", host_exe_path.display());
+    }
+
     let total_start = Instant::now();
     let exec_parsing_start = total_start;
     let exec_data = &*open_mmap(host_exe_path);
-    let exec_obj = match object::File::parse(exec_data) {
+    let exec_obj = match File::parse(exec_data) {
         Ok(obj) => obj,
         Err(err) => {
             internal_error!("Failed to parse executable file: {}", err);
@@ -335,7 +339,8 @@ pub(crate) fn preprocess_macho_le(
 
     // PLT stands for Procedure Linkage Table which is, put simply, used to call external
     // procedures/functions whose address isn't known in the time of linking, and is left
-    // to be resolved by the dynamic linker at run time.
+    // to be resolved by the dynamic linker at run time. Mach-O doesn't use the name PLT
+    // but instead calls them stubs.
     let symbol_and_plt_processing_start = Instant::now();
     let plt_section_name = "__stubs";
 
@@ -612,7 +617,7 @@ fn gen_macho_le(
     md: &mut Metadata,
     out_filename: &Path,
     macho_load_so_offset: usize,
-    _verbose: bool,
+    verbose: bool,
 ) -> MmapMut {
     // Just adding some extra context/useful info here.
     // I was talking to Jakub from the Zig team about macho linking and here are some useful comments:
@@ -626,6 +631,10 @@ fn gen_macho_le(
     // https://github.com/kubkon/zig-deploy
 
     use macho::{Section64, SegmentCommand64};
+
+    if verbose {
+        println!("Memory mapping output file: {}", out_filename.display());
+    }
 
     let exec_header = load_struct_inplace::<macho::MachHeader64<LE>>(exec_data, 0);
     let num_load_cmds = exec_header.ncmds.get(LE);
@@ -1090,7 +1099,7 @@ pub(crate) fn surgery_macho(
     verbose: bool,
     time: bool,
 ) {
-    let app_obj = match object::File::parse(roc_app_bytes) {
+    let app_obj = match File::parse(roc_app_bytes) {
         Ok(obj) => obj,
         Err(err) => {
             internal_error!("Failed to parse application file: {}", err);
@@ -1175,7 +1184,7 @@ fn surgery_macho_help(
     md: &Metadata,
     exec_mmap: &mut MmapMut,
     offset_ref: &mut usize, // TODO return this instead of taking a mutable reference to it
-    app_obj: object::File,
+    app_obj: File,
 ) {
     let mut offset = align_by_constraint(md.exec_len as usize, MIN_SECTION_ALIGNMENT);
     // let new_rodata_section_offset = offset;
@@ -1677,7 +1686,7 @@ fn surgery_macho_help(
 
 fn get_target_offset(
     index: SymbolIndex,
-    app_obj: &object::File,
+    app_obj: &File,
     md: &Metadata,
     symbol_vaddr_map: &MutMap<SymbolIndex, usize>,
     verbose: bool,
