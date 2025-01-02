@@ -2,7 +2,10 @@ use bincode::{deserialize_from, serialize_into};
 use iced_x86::{Decoder, DecoderOptions, Instruction, OpCodeOperandKind, OpKind};
 use memmap2::MmapMut;
 use object::macho;
-use object::read::macho::{MachOFile64, MachOSection64, MachOSymbol64};
+use object::read::macho::{
+    LoadCommandVariant, MachOFile64, MachOSection64, MachOSymbol64, Section as SectionTrait,
+    Segment as SegmentTrait,
+};
 use object::{
     LittleEndian as LE, Object, ObjectSection, ObjectSymbol, RelocationFlags, RelocationKind,
     RelocationTarget, SectionIndex, SectionKind, SymbolIndex, SymbolSection,
@@ -21,8 +24,7 @@ use std::{
 use crate::util::{is_roc_undefined, report_timing};
 use crate::{
     align_by_constraint, align_to_offset_by_constraint, load_struct_inplace,
-    load_struct_inplace_mut, load_structs_inplace, load_structs_inplace_mut, open_mmap,
-    open_mmap_mut,
+    load_struct_inplace_mut, load_structs_inplace_mut, open_mmap, open_mmap_mut,
 };
 
 type Section<'a> = MachOSection64<'a, 'a, LE, &'a [u8]>;
@@ -346,137 +348,57 @@ pub(crate) fn preprocess_macho_le(
     }
 
     let app_syms: Vec<_> = exec_obj.symbols().filter(is_roc_undefined).collect();
-
     let mut app_func_addresses: MutMap<u64, &str> = MutMap::default();
-    let mut macho_load_so_offset = None;
 
-    {
-        use macho::{DyldInfoCommand, DylibCommand, Section64, SegmentCommand64};
+    let stubs_section_info = match section_info_by_name(&exec_obj, "__TEXT", "__stubs") {
+        Ok(Some(info)) => info,
+        Ok(None) => internal_error!("__TEXT,__stubs section not found"),
+        Err(err) => internal_error!("Failed to parse load commands: {err}"),
+    };
 
-        let exec_header = load_struct_inplace::<macho::MachHeader64<LE>>(exec_data, 0);
-        let num_load_cmds = exec_header.ncmds.get(LE);
+    let stubs_symbol_index = stubs_section_info.reserved1.get(LE);
+    let stubs_symbol_count = stubs_section_info.size(LE) / STUB_ADDRESS_OFFSET;
 
-        let mut offset = mem::size_of_val(exec_header);
+    match find_load_command(&exec_obj, macho::LC_DYLD_INFO_ONLY) {
+        Ok(Some(lc)) => {
+            let LoadCommandVariant::DyldInfo(info) = lc else {
+                panic!("unexpected load command variant for LC_DYLD_INFO_ONLY");
+            };
+            let lazy_bind_offset = info.lazy_bind_off.get(LE) as usize;
 
-        let mut stubs_symbol_index = None;
-        let mut stubs_symbol_count = None;
+            let lazy_bind_symbols = mach_object::LazyBind::parse(
+                &exec_data[lazy_bind_offset..],
+                mem::size_of::<usize>(),
+            );
 
-        'cmds: for _ in 0..num_load_cmds {
-            let info = load_struct_inplace::<macho::LoadCommand<LE>>(exec_data, offset);
-            let cmd = info.cmd.get(LE);
-            let cmdsize = info.cmdsize.get(LE);
-
-            if cmd == macho::LC_SEGMENT_64 {
-                let info = load_struct_inplace::<SegmentCommand64<LE>>(exec_data, offset);
-
-                if &info.segname[0..6] == b"__TEXT" {
-                    let sections = info.nsects.get(LE);
-
-                    let sections_info = load_structs_inplace::<Section64<LE>>(
-                        exec_data,
-                        offset + mem::size_of_val(info),
-                        sections as usize,
-                    );
-
-                    for section_info in sections_info {
-                        if &section_info.sectname[0..7] == b"__stubs" {
-                            stubs_symbol_index = Some(section_info.reserved1.get(LE));
-                            stubs_symbol_count =
-                                Some(section_info.size.get(LE) / STUB_ADDRESS_OFFSET);
-
-                            break 'cmds;
-                        }
-                    }
-                }
-            }
-
-            offset += cmdsize as usize;
-        }
-
-        let stubs_symbol_index = stubs_symbol_index.unwrap_or_else(|| {
-            panic!("Could not find stubs symbol index.");
-        });
-        let stubs_symbol_count = stubs_symbol_count.unwrap_or_else(|| {
-            panic!("Could not find stubs symbol count.");
-        });
-
-        // Reset offset before looping through load commands again
-        offset = mem::size_of_val(exec_header);
-
-        let shared_lib_filename = shared_lib.file_name();
-
-        for _ in 0..num_load_cmds {
-            let info = load_struct_inplace::<macho::LoadCommand<LE>>(exec_data, offset);
-            let cmd = info.cmd.get(LE);
-            let cmdsize = info.cmdsize.get(LE);
-
-            if cmd == macho::LC_DYLD_INFO_ONLY {
-                let info = load_struct_inplace::<DyldInfoCommand<LE>>(exec_data, offset);
-
-                let lazy_bind_offset = info.lazy_bind_off.get(LE) as usize;
-
-                let lazy_bind_symbols = mach_object::LazyBind::parse(
-                    &exec_data[lazy_bind_offset..],
-                    mem::size_of::<usize>(),
-                );
-
-                // Find all the lazily-bound roc symbols
-                // (e.g. "_roc__mainForHost_1_exposed")
-                // For Macho, we may need to deal with some GOT stuff here as well.
-                for (i, symbol) in lazy_bind_symbols
-                    .skip(stubs_symbol_index as usize)
-                    .take(stubs_symbol_count as usize)
-                    .enumerate()
+            // Find all the lazily-bound roc symbols
+            // (e.g. "_roc__mainForHost_1_exposed")
+            // For Macho, we may need to deal with some GOT stuff here as well.
+            for (i, symbol) in lazy_bind_symbols
+                .skip(stubs_symbol_index as usize)
+                .take(stubs_symbol_count as usize)
+                .enumerate()
+            {
+                if let Some(sym) = app_syms
+                    .iter()
+                    .find(|app_sym| app_sym.name() == Ok(&symbol.name))
                 {
-                    if let Some(sym) = app_syms
-                        .iter()
-                        .find(|app_sym| app_sym.name() == Ok(&symbol.name))
-                    {
-                        let func_address = (i as u64 + 1) * STUB_ADDRESS_OFFSET + plt_address;
-                        let func_offset = (i as u64 + 1) * STUB_ADDRESS_OFFSET + plt_offset;
-                        app_func_addresses.insert(func_address, sym.name().unwrap());
-                        md.plt_addresses
-                            .insert(sym.name().unwrap().to_string(), (func_offset, func_address));
-                    }
-                }
-            } else if cmd == macho::LC_LOAD_DYLIB {
-                let info = load_struct_inplace::<DylibCommand<LE>>(exec_data, offset);
-                let name_offset = info.dylib.name.offset.get(LE) as usize;
-                let str_start_index = offset + name_offset;
-                let str_end_index = offset + cmdsize as usize;
-                let str_bytes = &exec_data[str_start_index..str_end_index];
-                let path = {
-                    if str_bytes[str_bytes.len() - 1] == 0 {
-                        // If it's nul-terminated, it's a C String.
-                        // Use the unchecked version because these are
-                        // padded with 0s at the end, so since we don't
-                        // know the exact length, using the checked version
-                        // of this can fail due to the interior nul bytes.
-                        //
-                        // Also, we have to use from_ptr instead of
-                        // from_bytes_with_nul_unchecked because currently
-                        // std::ffi::CStr is actually not a char* under
-                        // the hood (!) but rather an array, so to strip
-                        // the trailing null bytes we have to use from_ptr.
-                        let c_str = unsafe { CStr::from_ptr(str_bytes.as_ptr() as *const c_char) };
-
-                        Path::new(c_str.to_str().unwrap())
-                    } else {
-                        // It wasn't nul-terminated, so treat all the bytes
-                        // as the string
-
-                        Path::new(std::str::from_utf8(str_bytes).unwrap())
-                    }
-                };
-
-                if path.file_name() == shared_lib_filename {
-                    macho_load_so_offset = Some(offset);
+                    let func_address = (i as u64 + 1) * STUB_ADDRESS_OFFSET + plt_address;
+                    let func_offset = (i as u64 + 1) * STUB_ADDRESS_OFFSET + plt_offset;
+                    app_func_addresses.insert(func_address, sym.name().unwrap());
+                    md.plt_addresses
+                        .insert(sym.name().unwrap().to_string(), (func_offset, func_address));
                 }
             }
-
-            offset += cmdsize as usize;
         }
+        Ok(None) => internal_error!("Failed to find LC_DYLD_INFO_ONLY load command"),
+        Err(err) => internal_error!("Failed to parse LC_DYLD_INFO_ONLY load command: {err}"),
     }
+
+    let macho_load_so_offset = match preprocess_dylibs(&exec_obj, shared_lib) {
+        Ok(offset) => offset,
+        Err(err) => internal_error!("Failed to precprocess LC_DYLIB load commands: {err}"),
+    };
 
     for sym in app_syms.iter() {
         let name = sym.name().unwrap().to_string();
@@ -587,6 +509,78 @@ pub(crate) fn preprocess_macho_le(
         );
         report_timing("Total", total_duration);
     }
+}
+
+fn preprocess_dylibs(object: &File, shared_lib: &Path) -> object::Result<Option<usize>> {
+    let shared_lib_filename = shared_lib.file_name();
+    let mut macho_load_so_offset = None;
+    let mut offset = mem::size_of::<macho::MachHeader64<LE>>();
+    while let Some(lc) = object.macho_load_commands()?.next()? {
+        if let Some(info) = lc.dylib()? {
+            let name_offset = info.dylib.name.offset.get(LE) as usize;
+            let str_bytes = &lc.raw_data()[name_offset..];
+            let path = {
+                if str_bytes[str_bytes.len() - 1] == 0 {
+                    // If it's nul-terminated, it's a C String.
+                    // Use the unchecked version because these are
+                    // padded with 0s at the end, so since we don't
+                    // know the exact length, using the checked version
+                    // of this can fail due to the interior nul bytes.
+                    //
+                    // Also, we have to use from_ptr instead of
+                    // from_bytes_with_nul_unchecked because currently
+                    // std::ffi::CStr is actually not a char* under
+                    // the hood (!) but rather an array, so to strip
+                    // the trailing null bytes we have to use from_ptr.
+                    let c_str = unsafe { CStr::from_ptr(str_bytes.as_ptr() as *const c_char) };
+
+                    Path::new(c_str.to_str().unwrap())
+                } else {
+                    // It wasn't nul-terminated, so treat all the bytes
+                    // as the string
+
+                    Path::new(std::str::from_utf8(str_bytes).unwrap())
+                }
+            };
+
+            if path.file_name() == shared_lib_filename {
+                macho_load_so_offset = Some(offset);
+            }
+        }
+        offset += lc.cmdsize() as usize;
+    }
+    Ok(macho_load_so_offset)
+}
+
+fn section_info_by_name<'a>(
+    object: &'a File,
+    segname: &'a str,
+    sectname: &'a str,
+) -> object::Result<Option<&'a macho::Section64<LE>>> {
+    while let Some(lc) = object.macho_load_commands()?.next()? {
+        if let Some((info, data)) = lc.segment_64()? {
+            if info.name() == segname.as_bytes() {
+                for section_info in info.sections(LE, data)? {
+                    if section_info.name() == sectname.as_bytes() {
+                        return Ok(Some(section_info));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn find_load_command<'a>(
+    object: &'a File,
+    cmd: u32,
+) -> object::Result<Option<LoadCommandVariant<'a, LE>>> {
+    while let Some(lc) = object.macho_load_commands()?.next()? {
+        if lc.cmd() == cmd {
+            return Ok(Some(lc.variant()?));
+        }
+    }
+    Ok(None)
 }
 
 fn gen_macho_le(
